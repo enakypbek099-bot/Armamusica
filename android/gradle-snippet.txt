@@ -1,0 +1,3 @@
+// app/build.gradle(.kts) -> dependencies { ... }
+implementation("androidx.media3:media3-exoplayer:1.5.1") // use the latest version
+// minSdk 21+ recommended
