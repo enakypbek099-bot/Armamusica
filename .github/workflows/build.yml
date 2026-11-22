@@ -1,0 +1,464 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create Android project files
+        run: |
+          cat > settings.gradle.kts <<'EOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "Armamus"
+          include(":app")
+          EOF
+          cat > build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application") version "8.7.3" apply false
+              id("org.jetbrains.kotlin.android") version "2.0.21" apply false
+          }
+          EOF
+          cat > gradle.properties <<'EOF'
+          org.gradle.jvmargs=-Xmx2g -Dfile.encoding=UTF-8
+          android.useAndroidX=true
+          android.nonTransitiveRClass=true
+          EOF
+          mkdir -p app
+          cat > app/build.gradle.kts <<'EOF'
+          plugins {
+              id("com.android.application")
+              id("org.jetbrains.kotlin.android")
+          }
+
+          android {
+              namespace = "com.armamus.app"
+              compileSdk = 35
+
+              defaultConfig {
+                  applicationId = "com.armamus.app"
+                  minSdk = 26
+                  targetSdk = 34
+                  versionCode = 1
+                  versionName = "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      isMinifyEnabled = false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility = JavaVersion.VERSION_17
+                  targetCompatibility = JavaVersion.VERSION_17
+              }
+              kotlinOptions {
+                  jvmTarget = "17"
+              }
+          }
+
+          dependencies {
+              implementation("androidx.core:core-ktx:1.15.0")
+              implementation("androidx.appcompat:appcompat:1.7.0")
+              implementation("androidx.webkit:webkit:1.12.1")
+              implementation("androidx.media3:media3-exoplayer:1.5.1")
+          }
+          EOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+
+              <application
+                  android:allowBackup="true"
+                  android:icon="@mipmap/ic_launcher"
+                  android:roundIcon="@mipmap/ic_launcher"
+                  android:label="@string/app_name"
+                  android:theme="@style/Theme.Armamus">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout"
+                      android:windowSoftInputMode="adjustResize">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          EOF
+          mkdir -p app/src/main/java/com/armamus/app
+          cat > app/src/main/java/com/armamus/app/MainActivity.kt <<'EOF'
+          package com.armamus.app
+
+          import android.annotation.SuppressLint
+          import android.content.Intent
+          import android.graphics.Color
+          import android.net.Uri
+          import android.os.Bundle
+          import android.os.Message
+          import android.webkit.ValueCallback
+          import android.webkit.WebChromeClient
+          import android.webkit.WebResourceRequest
+          import android.webkit.WebResourceResponse
+          import android.webkit.WebView
+          import android.webkit.WebViewClient
+          import androidx.activity.OnBackPressedCallback
+          import androidx.activity.result.contract.ActivityResultContracts
+          import androidx.appcompat.app.AppCompatActivity
+          import androidx.webkit.WebViewAssetLoader
+
+          class MainActivity : AppCompatActivity() {
+
+              private lateinit var web: WebView
+              private lateinit var bridge: ArmamusMedia3Bridge
+              private var filePathCallback: ValueCallback<Array<Uri>>? = null
+
+              // Handles the file picker opened by <input type="file"> in index.html
+              private val chooser = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { r ->
+                  filePathCallback?.onReceiveValue(
+                      WebChromeClient.FileChooserParams.parseResult(r.resultCode, r.data)
+                  )
+                  filePathCallback = null
+              }
+
+              @SuppressLint("SetJavaScriptEnabled")
+              override fun onCreate(savedInstanceState: Bundle?) {
+                  super.onCreate(savedInstanceState)
+                  window.statusBarColor = Color.BLACK
+                  window.navigationBarColor = Color.BLACK
+
+                  web = WebView(this)
+                  setContentView(web)
+
+                  // Serves app/src/main/assets/* over a secure https origin (needed for IndexedDB, wasm, blob:)
+                  val loader = WebViewAssetLoader.Builder()
+                      .addPathHandler("/assets/", WebViewAssetLoader.AssetsPathHandler(this))
+                      .build()
+
+                  web.webViewClient = object : WebViewClient() {
+                      override fun shouldInterceptRequest(
+                          view: WebView,
+                          request: WebResourceRequest
+                      ): WebResourceResponse? = loader.shouldInterceptRequest(request.url)
+
+                      // Links to other sites (WhatsApp, Telegram, ...) open in the phone's own apps/browser
+                      override fun shouldOverrideUrlLoading(view: WebView, request: WebResourceRequest): Boolean {
+                          if (request.url.host == "appassets.androidplatform.net") return false
+                          openExternal(request.url)
+                          return true
+                      }
+                  }
+
+                  web.webChromeClient = object : WebChromeClient() {
+                      // window.open(...) used by the share buttons
+                      override fun onCreateWindow(
+                          view: WebView, isDialog: Boolean, isUserGesture: Boolean, resultMsg: Message
+                      ): Boolean {
+                          val temp = WebView(this@MainActivity)
+                          temp.webViewClient = object : WebViewClient() {
+                              override fun shouldOverrideUrlLoading(v: WebView, r: WebResourceRequest): Boolean {
+                                  openExternal(r.url)
+                                  return true
+                              }
+                          }
+                          (resultMsg.obj as WebView.WebViewTransport).webView = temp
+                          resultMsg.sendToTarget()
+                          return true
+                      }
+
+                      override fun onShowFileChooser(
+                          webView: WebView,
+                          callback: ValueCallback<Array<Uri>>,
+                          params: FileChooserParams
+                      ): Boolean {
+                          filePathCallback?.onReceiveValue(null)
+                          filePathCallback = callback
+                          return try {
+                              chooser.launch(params.createIntent())
+                              true
+                          } catch (e: Exception) {
+                              filePathCallback = null
+                              false
+                          }
+                      }
+                  }
+
+                  web.settings.apply {
+                      javaScriptEnabled = true
+                      domStorageEnabled = true
+                      mediaPlaybackRequiresUserGesture = false
+                      setSupportMultipleWindows(true)
+                      javaScriptCanOpenWindowsAutomatically = true
+                      allowFileAccess = false
+                  }
+
+                  bridge = ArmamusMedia3Bridge(this, web)
+                  web.addJavascriptInterface(bridge, "ArmamusNative")
+
+                  // Back button sends the app to background instead of closing it (music keeps playing)
+                  onBackPressedDispatcher.addCallback(this, object : OnBackPressedCallback(true) {
+                      override fun handleOnBackPressed() {
+                          moveTaskToBack(true)
+                      }
+                  })
+
+                  web.loadUrl("https://appassets.androidplatform.net/assets/index.html")
+              }
+
+              private fun openExternal(uri: Uri) {
+                  try {
+                      startActivity(Intent(Intent.ACTION_VIEW, uri))
+                  } catch (e: Exception) {
+                      // no app can handle this link
+                  }
+              }
+
+              override fun onDestroy() {
+                  bridge.release()
+                  web.destroy()
+                  super.onDestroy()
+              }
+          }
+          EOF
+          mkdir -p app/src/main/java/com/armamus/app
+          cat > app/src/main/java/com/armamus/app/ArmamusMedia3Bridge.kt <<'EOF'
+          package com.armamus.app // <- change to your package name
+
+          import android.content.Context
+          import android.net.Uri
+          import android.os.Handler
+          import android.os.Looper
+          import android.webkit.JavascriptInterface
+          import android.webkit.WebView
+          import androidx.media3.common.AudioAttributes
+          import androidx.media3.common.C
+          import androidx.media3.common.MediaItem
+          import androidx.media3.common.PlaybackException
+          import androidx.media3.common.PlaybackParameters
+          import androidx.media3.common.Player
+          import androidx.media3.exoplayer.ExoPlayer
+          import java.io.File
+          import java.io.FileOutputStream
+
+          /**
+           * window.ArmamusNative bridge for the HTML player.
+           * Plays Dolby Atmos (E-AC-3 JOC / AC-4) and other files through Media3 ExoPlayer.
+           *
+           * Usage (inside an Activity):
+           *   webView.settings.javaScriptEnabled = true
+           *   webView.addJavascriptInterface(ArmamusMedia3Bridge(this, webView), "ArmamusNative")
+           * in onDestroy(): bridge.release()
+           */
+          class ArmamusMedia3Bridge(private val ctx: Context, private val web: WebView) {
+
+              private val main = Handler(Looper.getMainLooper())
+              private val dir = File(ctx.cacheDir, "armamus_exo").apply { mkdirs() }
+              private val keepFiles = 6
+
+              private val player: ExoPlayer = ExoPlayer.Builder(ctx)
+                  .setAudioAttributes(
+                      AudioAttributes.Builder()
+                          .setUsage(C.USAGE_MEDIA)
+                          .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                          .build(),
+                      /* handleAudioFocus = */ true
+                  )
+                  .setHandleAudioBecomingNoisy(true)
+                  .build()
+
+              private val ticker = object : Runnable {
+                  override fun run() {
+                      if (player.isPlaying) js("time")
+                      main.postDelayed(this, 250)
+                  }
+              }
+
+              init {
+                  player.addListener(object : Player.Listener {
+                      override fun onPlaybackStateChanged(state: Int) {
+                          when (state) {
+                              Player.STATE_READY -> js("ready")
+                              Player.STATE_ENDED -> js("ended")
+                          }
+                      }
+                      override fun onIsPlayingChanged(isPlaying: Boolean) {
+                          js(if (isPlaying) "play" else "pause")
+                      }
+                      override fun onPlayerError(error: PlaybackException) {
+                          js("error")
+                      }
+                  })
+                  main.post(ticker)
+              }
+
+              private fun js(type: String) {
+                  val pos = player.currentPosition.coerceAtLeast(0)
+                  val dur = if (player.duration == C.TIME_UNSET) -1L else player.duration
+                  web.post { web.evaluateJavascript("window.__exoEvent&&window.__exoEvent('$type',$pos,$dur)", null) }
+              }
+
+              private fun safe(key: String) = key.replace(Regex("[^A-Za-z0-9_-]"), "_")
+              private fun fileOf(key: String) = File(dir, safe(key))
+              private fun doneOf(key: String) = File(dir, safe(key) + ".done")
+
+              // ---------- receiving the file (JS sends it in chunks) ----------
+
+              @JavascriptInterface
+              fun has(key: String): Boolean = doneOf(key).exists() && fileOf(key).length() > 0
+
+              @JavascriptInterface
+              fun begin(key: String) {
+                  doneOf(key).delete()
+                  fileOf(key).delete()
+              }
+
+              @JavascriptInterface
+              fun chunk(key: String, base64: String) {
+                  val bytes = android.util.Base64.decode(base64, android.util.Base64.DEFAULT)
+                  FileOutputStream(fileOf(key), true).use { it.write(bytes) }
+              }
+
+              // ---------- playback ----------
+
+              /** ext - file extension (eac3, ec3, ac3, ac4, m4a, mp4 ...) */
+              @JavascriptInterface
+              fun open(key: String, ext: String, autoplay: Boolean) {
+                  val src = fileOf(key)
+                  if (!src.exists()) { js("error"); return }
+                  // ExoPlayer sniffs content, but a proper file extension helps raw .ec3/.ac3 files
+                  val named = File(dir, safe(key) + "." + ext.ifEmpty { "bin" })
+                  if (!named.exists()) src.copyTo(named, overwrite = true)
+                  doneOf(key).writeText("1")
+                  trim()
+                  main.post {
+                      player.setMediaItem(MediaItem.fromUri(Uri.fromFile(named)))
+                      player.prepare()
+                      player.playWhenReady = autoplay
+                  }
+              }
+
+              @JavascriptInterface fun play() { main.post { player.play() } }
+              @JavascriptInterface fun pause() { main.post { player.pause() } }
+              @JavascriptInterface fun seek(ms: Long) { main.post { player.seekTo(ms) } }
+              @JavascriptInterface fun setRate(rate: Float) { main.post { player.playbackParameters = PlaybackParameters(rate) } }
+              @JavascriptInterface fun setVolume(v: Float) { main.post { player.volume = v.coerceIn(0f, 1f) } }
+              @JavascriptInterface fun stop() { main.post { player.stop() } }
+
+              private fun trim() {
+                  val files = dir.listFiles()?.filter { it.isFile && !it.name.endsWith(".done") }
+                      ?.sortedByDescending { it.lastModified() } ?: return
+                  files.drop(keepFiles * 2).forEach { f ->
+                      f.delete(); File(dir, f.nameWithoutExtension + ".done").delete()
+                  }
+              }
+
+              fun release() {
+                  main.removeCallbacks(ticker)
+                  player.release()
+              }
+          }
+          EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/strings.xml <<'EOF'
+          <resources>
+              <string name="app_name">ARMAMUS</string>
+          </resources>
+          EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/colors.xml <<'EOF'
+          <resources>
+              <color name="ic_background">#050507</color>
+              <color name="ic_accent">#FF3B6B</color>
+          </resources>
+          EOF
+          mkdir -p app/src/main/res/values
+          cat > app/src/main/res/values/themes.xml <<'EOF'
+          <resources>
+              <style name="Theme.Armamus" parent="Theme.AppCompat.NoActionBar">
+                  <item name="android:windowBackground">@color/ic_background</item>
+                  <item name="android:statusBarColor">@color/ic_background</item>
+                  <item name="android:navigationBarColor">@color/ic_background</item>
+              </style>
+          </resources>
+          EOF
+          mkdir -p app/src/main/res/drawable
+          cat > app/src/main/res/drawable/ic_launcher_foreground.xml <<'EOF'
+          <vector xmlns:android="http://schemas.android.com/apk/res/android"
+              android:width="108dp"
+              android:height="108dp"
+              android:viewportWidth="108"
+              android:viewportHeight="108">
+              <path
+                  android:fillColor="#FF3B6B"
+                  android:pathData="M54,54m-26,0a26,26 0,1 1,52 0a26,26 0,1 1,-52 0" />
+              <path
+                  android:fillColor="#FFFFFF"
+                  android:pathData="M46,40L46,68L70,54Z" />
+          </vector>
+          EOF
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          EOF
+          mkdir -p app/src/main/res/mipmap-anydpi-v26
+          cat > app/src/main/res/mipmap-anydpi-v26/ic_launcher_round.xml <<'EOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
+              <background android:drawable="@color/ic_background" />
+              <foreground android:drawable="@drawable/ic_launcher_foreground" />
+          </adaptive-icon>
+          EOF
+
+      - name: Locate index.html
+        run: |
+          mkdir -p app/src/main/assets
+          if [ -f index.html ]; then cp index.html app/src/main/assets/index.html; fi
+          test -f app/src/main/assets/index.html || (echo "index.html not found" && exit 1)
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Accept Android SDK licenses
+        run: yes | sdkmanager --licenses > /dev/null || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.9
+
+      - name: Build debug APK
+        run: gradle assembleDebug --stacktrace
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Armamus-debug-apk
+          path: app/build/outputs/apk/debug/app-debug.apk
